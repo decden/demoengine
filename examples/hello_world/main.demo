@@ -1,0 +1,27 @@
+// The following variables are builtin: width, height, time
+
+// Render targets need to be defined at top level
+define_rt_with_depth("gbuffer", width, height, {"color": SRGB8, "normal": RGB8, "depth": R16});
+
+// The main function is the entry point
+fn main() {
+    bind_rt("gbuffer");
+    viewport(0, 0, width, height);
+    clear(#22bfe2);
+    program({"vert": "quad.vs.glsl", "frag": "gbuffer.fs.glsl"});
+    uniform_float("u_AspectRatio", width / height);
+    // Parameters starting with `sync` will automatically be displayed in the rocket editor
+    uniform_float("u_InnerRadius", 0.01 + sync.spheres.inner_r);
+    uniform_float("u_OuterRadius", 0.01 + sync.spheres.outer_r);
+    uniform_float("u_GridSpheresRadius", 0.01 + sync.spheres.grid_r);
+    draw_fullscreenquad();
+
+    bind_rt("screen");
+    viewport(0, 0, width, height);
+    clear(#00000000);
+    program({"vert": "quad.vs.glsl", "frag": "pulse_effect.fs.glsl"});
+    uniform_rtt("TexColor", "gbuffer.color");
+    uniform_float("u_AspectRatio", width / height);
+    uniform_float("u_Time", time);
+    draw_fullscreenquad();
+}

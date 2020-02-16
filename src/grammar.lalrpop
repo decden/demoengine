@@ -1,0 +1,160 @@
+use ast::{
+    DictionaryExpr, Function, FunctionCallExpr, KeyValuePairExpr, Parameter, Program, RenderTargetDef,
+    SourceSlice, Stmt, Type, ValueExpr,
+};
+use types::{BinaryOperator, RenderTargetFormat};
+use color::{LinearRGBA, SrgbRGBA};
+
+use std::str::FromStr;
+
+grammar;
+
+// Terminals
+Identifier: SourceSlice = <l:@L> <s:r"[a-zA-Z][0-9a-zA-Z_]*"> <r:@R> => SourceSlice::new(l, r);
+FloatLiteral: f32 = <s:r"-?[0-9]+(\.[0-9]*)?"> => f32::from_str(s).unwrap();
+StringLiteral: SourceSlice = <l:@L> <c:r#""[^"]*""#> <r:@R> => SourceSlice::new(l+1, r-1);
+SrgbLiteral: LinearRGBA = <l:@L> <c:r"#[0-9a-fA-F]{6}"> <r:@R> => SrgbRGBA::from_rgba(u32::from_str_radix(&c[1..], 16).unwrap().wrapping_shl(8) + 0xFF).into();
+SrgbaLiteral: LinearRGBA = <l:@L> <c:r"#[0-9a-fA-F]{8}"> <r:@R> => SrgbRGBA::from_rgba(u32::from_str_radix(&c[1..], 16).unwrap()).into();
+KeyValuePairs: Vec<KeyValuePairExpr> = {
+	<k:StringLiteral> ":" <v:ValueExpr> => vec![KeyValuePairExpr::new(k, v)],
+	<l:KeyValuePairs> "," <k:StringLiteral> ":" <v:ValueExpr> => { let mut l = l; l.push(KeyValuePairExpr::new(k, v)); l }
+};
+Bool: bool = {
+	"true" => true,
+	"false" => false,
+};
+Comment: () = <s:r#"//[^\n]*"#> => ();
+
+// Value expressions
+PropertyAccessor: Vec<SourceSlice> = {
+	"." <i:Identifier> => vec![i],
+	<p:PropertyAccessor> "." <i:Identifier> => { let mut p = p; p.push(i); p },
+};
+FunctionCallExpr: FunctionCallExpr =
+	<l:@L> <n:Identifier> <a:ArgumentPack> <r:@R> =>
+		FunctionCallExpr{source_slice: SourceSlice::new(l, r), function: n, args: a};
+ValueTerm: ValueExpr = {
+	// Literals
+	<l:@L> <f:FloatLiteral> <r:@R> => ValueExpr::FloatLiteral(SourceSlice::new(l, r), f),
+	<s:StringLiteral> => ValueExpr::StringLiteral(s),
+	<l:@L> <c:SrgbLiteral> <r:@R> => ValueExpr::ColorLiteral(SourceSlice::new(l, r), c),
+	<l:@L> <c:SrgbaLiteral> <r:@R> => ValueExpr::ColorLiteral(SourceSlice::new(l, r), c),
+	<l:@L> "{" <d:KeyValuePairs> "}" <r:@R> => ValueExpr::Dictionary(DictionaryExpr::new(SourceSlice::new(l, r), d)),
+	// Variables
+	<v:Identifier> => ValueExpr::Var(v),
+	// Expressions
+	"(" <v:ValueExpr> ")" => v,
+	<f:FunctionCallExpr> => ValueExpr::FunctionCall(f),
+	<l:@L> <op_l:@L> "-" <op_r:@R> "(" <v:ValueExpr> ")" <r:@R> =>
+		ValueExpr::FunctionCall(FunctionCallExpr{source_slice: SourceSlice::new(l, r), function: SourceSlice::new(op_l, op_r), args: vec![v]}),
+};
+ValueFactor: ValueExpr = {
+	<l:@L> <v:ValueTerm> <p:PropertyAccessor> <r:@R>    => ValueExpr::PropertyOf(SourceSlice::new(l, r), Box::new(v), p),
+	<l:@L> <lhs:ValueFactor> "*" <rhs:ValueTerm> <r:@R> => ValueExpr::BinaryOp(SourceSlice::new(l, r), BinaryOperator::Mul, Box::new(lhs), Box::new(rhs)),
+	<l:@L> <lhs:ValueFactor> "/" <rhs:ValueTerm> <r:@R> => ValueExpr::BinaryOp(SourceSlice::new(l, r), BinaryOperator::Div, Box::new(lhs), Box::new(rhs)),
+	ValueTerm,
+};
+ValuePiece: ValueExpr = {
+	<l:@L> <lhs:ValuePiece> "+" <rhs:ValueFactor> <r:@R> => ValueExpr::BinaryOp(SourceSlice::new(l, r), BinaryOperator::Add, Box::new(lhs), Box::new(rhs)),
+	<l:@L> <lhs:ValuePiece> "-" <rhs:ValueFactor> <r:@R> => ValueExpr::BinaryOp(SourceSlice::new(l, r), BinaryOperator::Sub, Box::new(lhs), Box::new(rhs)),
+	ValueFactor,
+};
+ValueExpr: ValueExpr = {
+	<l:@L> <lhs:ValueExpr> "<"  <rhs:ValuePiece> <r:@R> => ValueExpr::BinaryOp(SourceSlice::new(l, r), BinaryOperator::Lt, Box::new(lhs), Box::new(rhs)),
+	<l:@L> <lhs:ValueExpr> "<=" <rhs:ValuePiece> <r:@R> => ValueExpr::BinaryOp(SourceSlice::new(l, r), BinaryOperator::Le, Box::new(lhs), Box::new(rhs)),
+	<l:@L> <lhs:ValueExpr> ">"  <rhs:ValuePiece> <r:@R> => ValueExpr::BinaryOp(SourceSlice::new(l, r), BinaryOperator::Gt, Box::new(lhs), Box::new(rhs)),
+	<l:@L> <lhs:ValueExpr> ">=" <rhs:ValuePiece> <r:@R> => ValueExpr::BinaryOp(SourceSlice::new(l, r), BinaryOperator::Ge, Box::new(lhs), Box::new(rhs)),
+	<l:@L> <lhs:ValueExpr> "==" <rhs:ValuePiece> <r:@R> => ValueExpr::BinaryOp(SourceSlice::new(l, r), BinaryOperator::Eq, Box::new(lhs), Box::new(rhs)),
+	<l:@L> <lhs:ValueExpr> "!=" <rhs:ValuePiece> <r:@R> => ValueExpr::BinaryOp(SourceSlice::new(l, r), BinaryOperator::Ne, Box::new(lhs), Box::new(rhs)),
+	ValuePiece,
+};
+
+
+
+RenderTargetFormat: RenderTargetFormat = {
+	"SRGB8" => RenderTargetFormat::Srgb8,
+	"SRGBA8" => RenderTargetFormat::Srgba8,
+
+	"R8" => RenderTargetFormat::R8,
+	"RGB8" => RenderTargetFormat::Rgb8,
+	"RGBA8" => RenderTargetFormat::Rgba8,
+
+	"R16" => RenderTargetFormat::R16,
+	"R16F" => RenderTargetFormat::R16F,
+	"RGB16" => RenderTargetFormat::Rgb16,
+	"RGB16F" => RenderTargetFormat::Rgb16F,
+	"RGBA16" => RenderTargetFormat::Rgba16,
+	"RGBA16F" => RenderTargetFormat::Rgba16F,
+
+	"R32F" => RenderTargetFormat::R32F,
+	"RGB32F" => RenderTargetFormat::Rgb32F,
+	"RGBA32F" => RenderTargetFormat::Rgba32F,
+};
+RenderTargetFormats: Vec<(SourceSlice, RenderTargetFormat)> = {
+	<s:StringLiteral> ":" <f:RenderTargetFormat> => vec![(s, f)],
+	<v:RenderTargetFormats> "," <s:StringLiteral> ":" <f:RenderTargetFormat> => { let mut v = v; v.push((s, f)); v }
+};
+DefineRt: RenderTargetDef = {
+	<l:@L> "define_rt" "(" <n:StringLiteral> "," <w:ValueExpr> "," <h:ValueExpr> "," "{" <f:RenderTargetFormats> "}" ")" <r:@R> => RenderTargetDef::new(SourceSlice::new(l, r), n, w, h, f, false),
+	<l:@L> "define_rt_with_depth" "(" <n:StringLiteral> "," <w:ValueExpr> "," <h:ValueExpr> "," "{" <f:RenderTargetFormats> "}" ")" <r:@R> => RenderTargetDef::new(SourceSlice::new(l, r), n, w, h, f, true),
+};
+
+// Function arguments
+ArgumentList: Vec<ValueExpr> = {
+	<e:ValueExpr> => vec![e],
+	<l:ArgumentList> "," <e:ValueExpr> => { let mut l = l; l.push(e); l },
+};
+ArgumentPack: Vec<ValueExpr> = {
+	"(" ")" => vec![],
+	"(" <l:ArgumentList> ")" => l,
+};
+
+// Code blocks
+Statement: Stmt = {
+	<e:FunctionCallExpr> ";" => Stmt::FunctionCall(e),
+	"return" <e:ValueExpr> ";" => Stmt::Return{expr: e},
+
+	"if" <c:ValueExpr> <a:CodeBlock> "else" <b:CodeBlock> => Stmt::Conditional{condition: c, a: a, b: Some(b)},
+	"if" <c:ValueExpr> <a:CodeBlock> => Stmt::Conditional{condition: c, a: a, b: None},
+};
+StatementList: Vec<Stmt> = {
+	Comment => vec![],
+	<e:Statement> => vec![e],
+	<b:StatementList> <e:Statement> => { let mut b = b; b.push(e); b },
+	<b:StatementList> <c:Comment> => b,
+}
+CodeBlock: Vec<Stmt> = {
+	"{" <b: StatementList> "}" => b,
+	"{" "}" => vec![],
+};
+
+// Function parameters
+Parameter: Parameter = {
+	<n:Identifier> ":" <t:Type> => Parameter{name: n, value_type: t},
+};
+ParameterList: Vec<Parameter> = {
+	<a:Parameter> => vec![a],
+	<l:ParameterList> "," <a:Parameter> => { let mut l = l; l.push(a); l },
+};
+ParameterPack: Vec<Parameter> = {
+	"(" ")" => vec![],
+	"(" <l:ParameterList> ")" => l,
+};
+
+// Function definition
+Type: Type = {
+	"f32" => Type::Float32,
+};
+ProgFunction: Function = {
+	"fn" <n:Identifier> <a:ParameterPack> <b:CodeBlock> => Function::new(n, a, b, None),
+	"fn" <n:Identifier> <a:ParameterPack> "->" <r:Type> <b:CodeBlock> => Function::new(n, a, b, Some(r)),
+};
+
+pub Program: Program = {
+	Comment => Program::new(),
+	<t:DefineRt> ";" => { let mut p = Program::new(); p.render_targets.push(t); p },
+	<f:ProgFunction> =>  { let mut p = Program::new(); p.functions.push(f); p },
+	<p:Program> Comment => p,
+	<p:Program> <t:DefineRt> ";" => { let mut p = p; p.render_targets.push(t); p },
+	<p:Program> <f:ProgFunction> => { let mut p = p; p.functions.push(f); p },
+}

@@ -1,0 +1,6 @@
+Cargo.lock
+/target/
+**/*.rs.bk
+
+/assets/
+/src/grammar.rs
